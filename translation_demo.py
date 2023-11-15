@@ -2,14 +2,11 @@ import argparse
 import io
 import os
 import speech_recognition as sr
-import whisper
+#import whisper
 import torch
 import subprocess
 import nltk
 from nltk.tokenize import sent_tokenize
-
-
-
 
 from datetime import datetime, timedelta
 from queue import Queue
@@ -24,8 +21,7 @@ def main():
     
    
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="medium", help="Model to use",
-                        choices=["tiny", "base", "small", "medium", "large"])
+    parser.add_argument("--model", default="medium", help="Model to use", type=str)
     parser.add_argument("--device", default="auto", help="device to user for CTranslate2 inference",
                         choices=["auto", "cuda","cpu"])                   
     parser.add_argument("--compute_type", default="auto", help="Type of quantization to use",
@@ -45,10 +41,12 @@ def main():
                         help="How much empty space between recordings before we "
                              "consider it a new line in the transcription.", type=float) 
                              
-    if 'linux' in platform:
-        parser.add_argument("--default_microphone", default='pulse',
-                            help="Default microphone name for SpeechRecognition. "
-                                 "Run this with 'list' to view available Microphones.", type=str)
+    parser.add_argument("--default_microphone", default='0',
+                        help="Default microphone name for SpeechRecognition", type=int)
+    parser.add_argument("--list_microphones", action='store_true',
+                        help="List all microphones available as a possible input device.")
+    parser.add_argument("--largev3_workaround", action='store_true',
+                        help="Enable temporary bugfixes for large-v3 until upstream large-v3 support for faster-whisper is finalized.")
     args = parser.parse_args()
     
     # The last time a recording was retreived from the queue.
@@ -65,27 +63,33 @@ def main():
     
     # Important for linux users. 
     # Prevents permanent application hang and crash by using the wrong Microphone
-    if 'linux' in platform:
-        mic_name = args.default_microphone
-        if not mic_name or mic_name == 'list':
-            print("Available microphone devices are: ")
-            for index, name in enumerate(sr.Microphone.list_microphone_names()):
-                print(f"Microphone with name \"{name}\" found")   
-            return
-        else:
-            for index, name in enumerate(sr.Microphone.list_microphone_names()):
-                if mic_name in name:
-                    source = sr.Microphone(sample_rate=16000, device_index=index)
-                    break
+    # if 'linux' in platform:
+    mic_index = args.default_microphone
+    # print(sr.Microphone.list_working_microphones())
+    # exit()
+    if args.list_microphones:
+        print("Available microphone devices are: ")
+        for index, name in enumerate(sr.Microphone.list_microphone_names()):
+            print(f"Microphone {index} - with name \"{name}\" found")   
+        return
     else:
         source = sr.Microphone(sample_rate=16000)
+        for index, name in enumerate(sr.Microphone.list_microphone_names()):
+            if mic_index == index:
+                source = sr.Microphone(sample_rate=16000, device_index=index)
+                break
+
+    if os.path.exists(args.model): 
+        model = args.model
+    elif args.model in ["tiny", "base", "small", "medium", "large"]: 
+        if args.model == "large":
+            args.model = "large-v2"    
     
-    if args.model == "large":
-        args.model = "large-v2"    
-    
-    model = args.model
-    if args.model != "large-v2" and not args.non_english:
-        model = model + ".en"
+        model = args.model
+        if args.model != "large-v2" and not args.non_english:
+            model = model + ".en"
+    else: 
+        raise ValueError(f'Value for --model should be a member of ["tiny", "base", "small", "medium", "large"], or a valid os path to a model directory.')
         
     translation_lang = args.translation_lang    
     device = args.device
@@ -97,6 +101,12 @@ def main():
     
     nltk.download('punkt')
     audio_model = WhisperModel(model, device = device, compute_type = compute_type , cpu_threads = cpu_threads)
+
+    # https://github.com/guillaumekln/faster-whisper/issues/547
+    # hacky workaround to work with large-v3 
+    if args.largev3_workaround:
+        audio_model.feature_extractor.mel_filters = audio_model.feature_extractor.get_mel_filters(audio_model.feature_extractor.sampling_rate, audio_model.feature_extractor.n_fft, n_mels=128)
+
     window = TranscriptionWindow()
     
     record_timeout = args.record_timeout
